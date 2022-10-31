@@ -1,0 +1,148 @@
+---
+title: "Practical Machine Learning - Week 4 Project"
+author: "Ezra Taylor"
+date: "10/28/2022"
+output: html_document
+---
+
+# Executive Summary  
+
+In this project I will attempt to predict 20 different test cases based on data from accelerometers on the belt, forearm, arm, and dumbbell of 6 participants. The participants were asked to perform barbell lifts correctly and incorrectly in 5 different ways. Each activity is identified as "classe" variable in this data set, with possible outcomes "A", "B", "C", "D", or "E".
+
+We will evaluate the effectiveness of the model based on accuracy of the prediction against a validation data set. We will use Cohen's kappa coefficient (k) to measure concordance.
+
+# Data Prep and Exploratory Analysis  
+
+Prior to performing any data collection, prep, or analysis, I will be utilizing the following libraries in this project
+
+```{r parallel_libraries,include=FALSE}
+#library(parallel)
+#library(doParallel)
+#library(doSNOW)
+#library(Matrix)
+#library(iterators)
+#library(foreach)
+#library(snow)
+```
+
+```{r library_setup,cache=TRUE,message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(dplyr)
+library(rpart)
+```
+
+The training and test data for this project is obtained from two repositories.  
+```{r data,cache=TRUE}
+training_full <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+testing <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+```
+
+The following table provides a summary of the variables included in this data set. "classe" is the outcome variable.
+```{r names}
+names(training_full)
+```
+
+To facilitate analysis, I will perform the following transformations:  
+- Convert the outcome variable, "classe", to a factor variable, since these should be discrete values rather than continuous values.    
+- Convert all other variables to numeric variables and coerce NA values to 0. This should eliminate most variables from the model other than those that provide numeric data related to acceleration.  
+- Remove any zero-sum columns, since these variables are unlikely to provide meaningful information to the model.  
+- Remove the columns for the variable X (index number), time stamps and window number. This should remove any bias for sequentially collected data.  
+- Move the outcome "classe" to the first column position.  
+
+```{r transforms, cache=TRUE, message=FALSE, warning=FALSE}
+training_full$classe <- as.factor(training_full$classe)
+training_num <- training_full %>% select(-classe) %>% mutate_all(as.numeric)
+training_num[is.na(training_num)] = 0
+training_num <- training_num[,colSums(training_num) != 0]
+training_num <- training_num %>% select(-c("X","raw_timestamp_part_1","raw_timestamp_part_2","num_window"))
+training_num <- cbind(training_full$classe,training_num)
+colnames(training_num)[1] = "classe"
+```
+
+Following the above procedure, I reduced the original 160 variables down to 143 numeric variables and 1 factor variable, the outcome.  
+```{r dims}
+dim(training_full)
+dim(training_num)
+```
+
+# Data Partitions  
+
+In order to predict outcomes for the test set, I will need to split my training data into a training set and a validation set. I will split my original training set into 50% training and 50% validation. I will set the seed to "123" for reproducibility.  
+
+```{r partition, cache=TRUE}
+set.seed(123)
+inTrain <- createDataPartition(y=training_num$classe,p=0.5,list=FALSE)
+training <- training_num[inTrain,]
+validation <- training_num[-inTrain,]
+dim(training)
+dim(validation)
+```
+
+Per the above split, my training set contains 9,812 values and my validation set contains 9,810 values.  
+
+I will re-sample with k-fold cross validation. Due to hardware limitations, I will utilize 5-fold cross validation as my resampling technique due to computational efficiency.  
+
+```{r parallel_code,include=FALSE}
+#paths <- .libPaths()
+#.libPaths(paths)
+#cluster <- makePSOCKcluster(detectCores() - 3) # convention to leave 1 core for OS
+#registerDoParallel(cluster)
+
+#stopCluster(cluster)
+#registerDoSEQ()
+```
+
+```{r fitControl, cache=TRUE}
+fitControl <- trainControl(method = "cv", number = 5,allowParallel = TRUE)
+```
+
+To support computational efficiency, I will convert my predictor variables into data frame "x" and the my outcome variable into data frame "y".  
+
+```{r x_y, cache=TRUE}
+x <- training[,-1]
+y <- training[,1]
+```
+
+# Training Model
+
+For this analysis, given that the outcome is a categorical outcome, I will use a random forest model based on the training data set I previously created. I will apply the previously created resampling method with 5-fold cross validation. For reproducibility, I will again set the seed. I will then apply the model to the validation data set with the outcome variable (classe) removed.
+
+```{r model_rf,cache=TRUE}
+set.seed(123)
+system.time(model_rf <- train(y=y,x=x,method="rf",trControl=fitControl))
+model_rf$finalModel
+```
+
+The calculated random forest model has 500 trees, with 72 variables tried at each split. The out of bag (OOB) estimate of the error rate is 1.24%.
+
+With my random forest model, I will predict the outcomes against the validation data set and evaluate the accuracy and kappa.  
+
+```{r prediction,cache=TRUE}
+predict_rf <- predict(model_rf,validation[,-1])
+postResample(predict_rf,validation$classe)
+```
+
+With an accuracy of 99.1% and a kappa of 98.8%, I can be reasonably confident that my model should accurately predict the testing set. I compare the predicted values against the actual values in the table below. This table confirms that number of incorrectly predicted values is much smaller than the correctly predicted values (along the diagonal from top left to bottom right).  
+
+```{r predict_table, cache=TRUE}
+validation$predRight <- predict_rf==validation$classe
+table(predict_rf,validation$classe)
+```
+
+# Prediction  
+
+Finally, we apply the random forest model to the testing data set. First, we need to remove the variables from the test data set that were excluded from our model. Then, similar as before, we will convert all predictor variables in the testing set to numeric.
+
+```{r test_transform, cache=TRUE, warning=FALSE}
+training_names <- names(training %>% select(-classe))
+testing_num <- testing %>% mutate_all(as.numeric) %>% select(all_of(training_names))
+testing_num[is.na(testing_num)] = 0
+```
+
+We then apply our model to the transformed testing set and predict "classe" for the testing set as follows.
+
+```{r test, cache=TRUE}
+predict_test <- predict(model_rf,testing_num)
+predict_test
+```
